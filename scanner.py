@@ -1,13 +1,10 @@
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-
-import requests
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.getenv("ODDS_API_KEY", "").strip()
+API_KEY = st.secrets.get("ODDS_API_KEY", os.getenv("ODDS_API_KEY", "")).strip()
 BASE_URL = "https://api.the-odds-api.com/v4"
 
 SPORTS = {
