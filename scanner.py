@@ -1,151 +1,161 @@
 import os
-from itertools import product
-from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import requests
-import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-API_BASE = "https://api.the-odds-api.com/v4"
-REGION = "uk"
-ODDS_FORMAT = "decimal"
-DATE_FORMAT = "iso"
+API_KEY = os.getenv("ODDS_API_KEY", "").strip()
+BASE_URL = "https://api.the-odds-api.com/v4"
 
-SPORTS: Dict[str, str] = {
-    "Football - English Premier League": "soccer_epl",
+SPORTS = {
+    "Football - EPL": "soccer_epl",
     "Football - UEFA Champions League": "soccer_uefa_champs_league",
-    "Football - England Championship": "soccer_efl_champ",
+    "Football - FA Cup": "soccer_fa_cup",
     "Basketball - NBA": "basketball_nba",
     "Tennis - ATP": "tennis_atp",
     "Tennis - WTA": "tennis_wta",
-    "Rugby League - NRL": "rugbyleague_nrl",
-    "Horse Racing": "horse_racing",
+    "Rugby Union": "rugbyunion",
+    "Rugby League": "rugbyleague",
 }
 
-UK_BOOKMAKERS = {
-    "bet365", "betfair_ex_uk", "betfair_sb_uk", "betfred", "boylesports",
-    "coral", "ladbrokes_uk", "paddypower", "skybet", "unibet_uk", "williamhill",
-}
+UK_BOOKMAKERS = [
+    "betfair_ex_uk",
+    "betfair_sb_uk",
+    "betfred",
+    "betvictor",
+    "boylesports",
+    "coral",
+    "grosvenor",
+    "ladbrokes_uk",
+    "leovegas",
+    "livescorebet",
+    "matchbook",
+    "paddypower",
+    "skybet",
+    "sport888",
+    "unibet_uk",
+    "virginbet",
+    "williamhill",
+]
 
-MARKETS_BY_SPORT = {
-    "default": ["h2h"],
-    "football": ["h2h", "totals", "btts"],
-    "basketball": ["h2h", "totals"],
-    "tennis": ["h2h"],
-    "horse": ["h2h"],
-}
-
-
-def get_api_key() -> str:
-    """Read API key from Streamlit Secrets first, then environment variables."""
-    try:
-        key = st.secrets.get("ODDS_API_KEY", "")
-    except Exception:
-        key = ""
-    return key or os.getenv("ODDS_API_KEY", "")
-
-
-def markets_for_sport(sport_key: str) -> List[str]:
-    if sport_key.startswith("soccer_"):
-        return MARKETS_BY_SPORT["football"]
-    if sport_key.startswith("basketball_"):
-        return MARKETS_BY_SPORT["basketball"]
-    if sport_key.startswith("tennis_"):
-        return MARKETS_BY_SPORT["tennis"]
-    if "horse" in sport_key:
-        return MARKETS_BY_SPORT["horse"]
-    return MARKETS_BY_SPORT["default"]
+PREFERRED_BOOKMAKERS = ["coral", "ladbrokes_uk", "betfred"]
 
 
-def fetch_odds(sport_key: str, market: str = "h2h") -> List[Dict[str, Any]]:
-    api_key = get_api_key()
-    if not api_key:
-        raise ValueError("Missing ODDS_API_KEY. Add it in Streamlit Secrets.")
+@dataclass
+class ArbOpportunity:
+    sport: str
+    event: str
+    commence_time: str
+    market: str
+    implied_probability: float
+    profit_margin: float
+    bets: Dict[str, Dict[str, Any]]
 
-    url = f"{API_BASE}/sports/{sport_key}/odds"
-    params = {
-        "apiKey": api_key,
-        "regions": REGION,
-        "markets": market,
-        "oddsFormat": ODDS_FORMAT,
-        "dateFormat": DATE_FORMAT,
-    }
-    response = requests.get(url, params=params, timeout=30)
 
-    if response.status_code == 401:
-        raise ValueError("Odds API rejected your key. Check ODDS_API_KEY in Streamlit Secrets.")
-    if response.status_code == 422:
-        raise ValueError(f"The selected market is not available for this sport: {market}")
-    if response.status_code == 429:
-        raise ValueError("Odds API limit reached. Try again later or upgrade your API plan.")
+def _require_api_key() -> None:
+    if not API_KEY or API_KEY == "your_odds_api_key_here":
+        raise RuntimeError("Missing ODDS_API_KEY. Add it to your .env file.")
 
+
+def get_active_sports() -> List[Dict[str, Any]]:
+    _require_api_key()
+    response = requests.get(f"{BASE_URL}/sports", params={"apiKey": API_KEY}, timeout=25)
     response.raise_for_status()
     return response.json()
 
 
-def _best_prices_for_event(event: Dict[str, Any], market_key: str) -> Dict[str, Dict[str, Any]]:
-    best: Dict[str, Dict[str, Any]] = {}
-    for bookmaker in event.get("bookmakers", []):
-        if bookmaker.get("key") not in UK_BOOKMAKERS:
-            continue
-        for market in bookmaker.get("markets", []):
-            if market.get("key") != market_key:
-                continue
-            for outcome in market.get("outcomes", []):
-                name = outcome.get("name")
-                price = outcome.get("price")
-                point = outcome.get("point")
-                if name is None or price is None:
-                    continue
-                outcome_key = f"{name} {point}" if point is not None else str(name)
-                if outcome_key not in best or price > best[outcome_key]["price"]:
-                    best[outcome_key] = {
-                        "outcome": outcome_key,
-                        "price": float(price),
-                        "bookmaker": bookmaker.get("title", bookmaker.get("key", "Unknown")),
-                    }
-    return best
+def fetch_odds(
+    sport_key: str,
+    region: str = "uk",
+    market: str = "h2h",
+    bookmakers: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    _require_api_key()
+    params = {
+        "apiKey": API_KEY,
+        "regions": region,
+        "markets": market,
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+
+    # If bookmakers is supplied, it takes precedence over regions in The Odds API.
+    if bookmakers:
+        params["bookmakers"] = ",".join(bookmakers)
+        params.pop("regions", None)
+
+    response = requests.get(f"{BASE_URL}/sports/{sport_key}/odds", params=params, timeout=30)
+    response.raise_for_status()
+    return response.json()
 
 
-def find_arbitrage(events: List[Dict[str, Any]], market_key: str = "h2h", min_profit: float = 0.0) -> List[Dict[str, Any]]:
-    opportunities: List[Dict[str, Any]] = []
+def find_arbitrage(events: List[Dict[str, Any]], market: str = "h2h") -> List[ArbOpportunity]:
+    opportunities: List[ArbOpportunity] = []
 
     for event in events:
-        best = _best_prices_for_event(event, market_key)
-        if len(best) < 2:
+        best_by_outcome: Dict[str, Dict[str, Any]] = {}
+
+        for bookmaker in event.get("bookmakers", []):
+            book_key = bookmaker.get("key", "unknown")
+            book_title = bookmaker.get("title", book_key)
+
+            for market_data in bookmaker.get("markets", []):
+                if market_data.get("key") != market:
+                    continue
+
+                for outcome in market_data.get("outcomes", []):
+                    name = outcome.get("name")
+                    price = outcome.get("price")
+                    if not name or not isinstance(price, (int, float)) or price <= 1:
+                        continue
+
+                    current = best_by_outcome.get(name)
+                    if current is None or float(price) > current["odds"]:
+                        best_by_outcome[name] = {
+                            "odds": float(price),
+                            "bookmaker_key": book_key,
+                            "bookmaker": book_title,
+                        }
+
+        if len(best_by_outcome) < 2:
             continue
 
-        implied_probability = sum(1 / item["price"] for item in best.values())
-        profit_percent = (1 - implied_probability) * 100
+        implied_probability = sum(1 / bet["odds"] for bet in best_by_outcome.values())
+        if implied_probability < 1:
+            home = event.get("home_team", "Home")
+            away = event.get("away_team", "Away")
+            profit_margin = (1 - implied_probability) * 100
+            opportunities.append(
+                ArbOpportunity(
+                    sport=event.get("sport_title", event.get("sport_key", "Unknown sport")),
+                    event=f"{home} vs {away}",
+                    commence_time=event.get("commence_time", ""),
+                    market=market,
+                    implied_probability=round(implied_probability, 5),
+                    profit_margin=round(profit_margin, 2),
+                    bets=best_by_outcome,
+                )
+            )
 
-        if implied_probability < 1 and profit_percent >= min_profit:
-            opportunities.append({
-                "sport": event.get("sport_title", ""),
-                "event": f"{event.get('home_team', '')} v {event.get('away_team', '')}".strip(" v"),
-                "commence_time": event.get("commence_time", ""),
-                "market": market_key,
-                "profit_percent": round(profit_percent, 2),
-                "implied_probability": round(implied_probability * 100, 2),
-                "best_prices": list(best.values()),
-            })
-
-    opportunities.sort(key=lambda x: x["profit_percent"], reverse=True)
-    return opportunities
+    return sorted(opportunities, key=lambda x: x.profit_margin, reverse=True)
 
 
-def build_stake_plan(best_prices: List[Dict[str, Any]], total_stake: float) -> List[Dict[str, Any]]:
-    inv_total = sum(1 / item["price"] for item in best_prices)
-    plan = []
-    for item in best_prices:
-        stake = total_stake * ((1 / item["price"]) / inv_total)
-        payout = stake * item["price"]
-        plan.append({
-            "Outcome": item["outcome"],
-            "Bookmaker": item["bookmaker"],
-            "Odds": item["price"],
-            "Stake": round(stake, 2),
-            "Return": round(payout, 2),
-        })
-    return plan
+def calculate_stakes(total_stake: float, bets: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    implied_total = sum(1 / bet["odds"] for bet in bets.values())
+    result: Dict[str, Dict[str, Any]] = {}
+
+    for outcome, bet in bets.items():
+        stake = total_stake * ((1 / bet["odds"]) / implied_total)
+        payout = stake * bet["odds"]
+        result[outcome] = {
+            "bookmaker": bet["bookmaker"],
+            "odds": bet["odds"],
+            "stake": round(stake, 2),
+            "expected_payout": round(payout, 2),
+            "expected_profit": round(payout - total_stake, 2),
+        }
+
+    return result

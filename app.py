@@ -1,66 +1,86 @@
+import os
+
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
-from scanner import SPORTS, fetch_odds, find_arbitrage, markets_for_sport, build_stake_plan, get_api_key
+from alerts import format_opportunity, send_telegram_message, telegram_enabled
+from scanner import SPORTS, UK_BOOKMAKERS, calculate_stakes, fetch_odds, find_arbitrage
 
-st.set_page_config(page_title="AI Arbitrage Scanner", page_icon="📈", layout="wide")
+load_dotenv()
 
+st.set_page_config(page_title="AI Arbitrage Scanner", layout="wide")
 st.title("AI Arbitrage Scanner")
 st.caption("Private tool for finding simple arbitrage opportunities from live bookmaker odds.")
 
 with st.sidebar:
     st.header("Settings")
     sport_label = st.selectbox("Sport", list(SPORTS.keys()))
-    sport_key = SPORTS[sport_label]
-    available_markets = markets_for_sport(sport_key)
-    market = st.selectbox("Market", available_markets, format_func=lambda x: {
-        "h2h": "Match Winner / Head to Head",
-        "totals": "Over / Under",
-        "btts": "Both Teams To Score",
-    }.get(x, x))
-    min_profit = st.number_input("Minimum profit %", min_value=0.0, max_value=50.0, value=0.0, step=0.1)
-    total_stake = st.number_input("Example total stake", min_value=1.0, max_value=100000.0, value=100.0, step=10.0)
+    market = st.selectbox("Market", ["h2h", "spreads", "totals"])
+    total_stake = st.number_input("Total stake (£)", min_value=10.0, value=100.0, step=10.0)
+    min_profit = st.number_input("Minimum profit margin (%)", min_value=0.0, value=float(os.getenv("MIN_PROFIT_MARGIN", "1.0")), step=0.1)
 
-api_key = get_api_key()
-if not api_key:
-    st.error("Missing ODDS_API_KEY. Add it in Streamlit: Manage app → Settings → Secrets.")
-    st.code('ODDS_API_KEY = "paste_your_real_key_here"', language="toml")
-    st.stop()
+    use_specific_books = st.checkbox("Use UK bookmaker list", value=False)
+    selected_books = []
+    if use_specific_books:
+        selected_books = st.multiselect("Bookmakers", UK_BOOKMAKERS, default=["coral", "ladbrokes_uk", "betfred"])
+
+    send_alerts = st.checkbox("Send Telegram alerts", value=False)
+    st.write("Telegram:", "Enabled" if telegram_enabled() else "Not configured")
+
+sport_key = SPORTS[sport_label]
 
 if st.button("Scan now", type="primary"):
     try:
-        with st.spinner("Scanning live bookmaker odds..."):
-            events = fetch_odds(sport_key, market)
-            opportunities = find_arbitrage(events, market, min_profit)
+        events = fetch_odds(
+            sport_key=sport_key,
+            region="uk",
+            market=market,
+            bookmakers=selected_books if use_specific_books and selected_books else None,
+        )
+        arbs = [a for a in find_arbitrage(events, market=market) if a.profit_margin >= min_profit]
 
-        st.success(f"Scanned {len(events)} events. Found {len(opportunities)} arbitrage opportunities.")
+        st.write(f"Checked {len(events)} events.")
 
-        if not opportunities:
-            st.info("No arbitrage found right now. Odds change quickly, so try again later or choose another sport/market.")
+        if not arbs:
+            st.warning("No arbitrage opportunities found for these settings.")
         else:
-            rows = []
-            for opp in opportunities:
-                rows.append({
-                    "Event": opp["event"],
-                    "Start": opp["commence_time"],
-                    "Market": opp["market"],
-                    "Profit %": opp["profit_percent"],
-                    "Implied %": opp["implied_probability"],
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.success(f"Found {len(arbs)} opportunities.")
 
-            for i, opp in enumerate(opportunities, start=1):
-                with st.expander(f"#{i} {opp['event']} — {opp['profit_percent']}% profit"):
-                    st.write("Best odds:")
-                    st.dataframe(pd.DataFrame(opp["best_prices"]), use_container_width=True)
-                    st.write(f"Example stake plan for £{total_stake:.2f} total stake:")
-                    st.dataframe(pd.DataFrame(build_stake_plan(opp["best_prices"], total_stake)), use_container_width=True)
+            summary_rows = []
+            for arb in arbs:
+                summary_rows.append({
+                    "Sport": arb.sport,
+                    "Event": arb.event,
+                    "Start": arb.commence_time,
+                    "Market": arb.market,
+                    "Profit Margin %": arb.profit_margin,
+                    "Implied Probability": arb.implied_probability,
+                })
+
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+
+            for arb in arbs:
+                st.divider()
+                st.subheader(f"{arb.event} — {arb.profit_margin}%")
+                st.write(f"Start: {arb.commence_time}")
+                stakes = calculate_stakes(total_stake, arb.bets)
+                df = pd.DataFrame.from_dict(stakes, orient="index")
+                df.index.name = "Outcome"
+                st.dataframe(df, use_container_width=True)
+
+                if send_alerts:
+                    send_telegram_message(format_opportunity(arb, total_stake, stakes))
+
+            if send_alerts:
+                st.info("Telegram alerts sent for displayed opportunities.")
 
     except Exception as exc:
         st.error(str(exc))
 
-st.markdown("---")
-st.subheader("Notes")
-st.write("• This scans the selected market and compares the best odds across UK bookmakers.")
-st.write("• Always confirm prices in the bookmaker account before placing bets.")
-st.write("• Start with small stakes while testing.")
+st.markdown("""
+### Notes
+- This scans the market you select and compares the best odds across bookmakers.
+- Odds can move quickly. Always confirm prices in the bookmaker account before placing bets.
+- Start with small stakes while testing.
+""")
